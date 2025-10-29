@@ -130,6 +130,16 @@ type EVM struct {
 
 	readOnly   bool   // Whether to throw on stateful modifications
 	returnData []byte // Last CALL's return data for subsequent reuse
+
+	// sloadCache is a transient per-call-frame cache for storage reads.
+	// Keyed by (contract address, storage slot). Cleared on each new call frame.
+	sloadCache map[sloadKey]common.Hash
+}
+
+// sloadKey composes the address and slot used as a key for SLOAD caching.
+type sloadKey struct {
+	addr common.Address
+	slot common.Hash
 }
 
 // NewEVM constructs an EVM instance with the supplied block context, state
@@ -147,6 +157,8 @@ func NewEVM(blockCtx BlockContext, statedb StateDB, chainConfig *params.ChainCon
 		hasher:      crypto.NewKeccakState(),
 	}
 	evm.precompiles = activePrecompiledContracts(evm.chainRules)
+	// Initialize transient SLOAD cache
+	evm.sloadCache = make(map[sloadKey]common.Hash)
 
 	switch {
 	case evm.chainRules.IsOsaka:
@@ -290,6 +302,8 @@ func (evm *EVM) Call(caller common.Address, addr common.Address, input []byte, g
 		if len(code) == 0 {
 			ret, err = nil, nil // gas is unchanged
 		} else {
+			// New call frame: reset transient SLOAD cache
+			evm.sloadCache = make(map[sloadKey]common.Hash)
 			// The contract is a scoped environment for this execution context only.
 			contract := NewContract(caller, addr, value, gas, evm.jumpDests)
 			contract.IsSystemCall = isSystemCall(caller)
@@ -351,6 +365,8 @@ func (evm *EVM) CallCode(caller common.Address, addr common.Address, input []byt
 	} else {
 		// Initialise a new contract and set the code that is to be used by the EVM.
 		// The contract is a scoped environment for this execution context only.
+		// New call frame: reset transient SLOAD cache
+		evm.sloadCache = make(map[sloadKey]common.Hash)
 		contract := NewContract(caller, caller, value, gas, evm.jumpDests)
 		contract.SetCallCode(evm.resolveCodeHash(addr), evm.resolveCode(addr))
 		ret, err = evm.Run(contract, input, false)
@@ -395,6 +411,8 @@ func (evm *EVM) DelegateCall(originCaller common.Address, caller common.Address,
 		// Initialise a new contract and make initialise the delegate values
 		//
 		// Note: The value refers to the original value from the parent call.
+		// New call frame: reset transient SLOAD cache
+		evm.sloadCache = make(map[sloadKey]common.Hash)
 		contract := NewContract(originCaller, caller, value, gas, evm.jumpDests)
 		contract.SetCallCode(evm.resolveCodeHash(addr), evm.resolveCode(addr))
 		ret, err = evm.Run(contract, input, false)
@@ -446,6 +464,8 @@ func (evm *EVM) StaticCall(caller common.Address, addr common.Address, input []b
 	} else {
 		// Initialise a new contract and set the code that is to be used by the EVM.
 		// The contract is a scoped environment for this execution context only.
+		// New call frame: reset transient SLOAD cache
+		evm.sloadCache = make(map[sloadKey]common.Hash)
 		contract := NewContract(caller, addr, new(uint256.Int), gas, evm.jumpDests)
 		contract.SetCallCode(evm.resolveCodeHash(addr), evm.resolveCode(addr))
 

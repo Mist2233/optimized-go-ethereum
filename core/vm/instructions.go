@@ -510,10 +510,26 @@ func opMstore8(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 }
 
 func opSload(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
+	// Keep the top stack element in place; it identifies the storage key to read
 	loc := scope.Stack.peek()
-	hash := common.Hash(loc.Bytes32())
-	val := evm.StateDB.GetState(scope.Contract.Address(), hash)
+	// Convert the 256-bit value into a common.Hash for StateDB lookups
+	slot := common.Hash(loc.Bytes32())
+	addr := scope.Contract.Address()
+	// Try to hit the per-frame SLOAD cache before touching the database
+	if evm.sloadCache != nil {
+		if cached, ok := evm.sloadCache[sloadKey{addr: addr, slot: slot}]; ok {
+			loc.SetBytes(cached.Bytes())
+			return nil, nil
+		}
+	}
+	// Cache miss: walk back to the StateDB
+	val := evm.StateDB.GetState(addr, slot)
+	// Push the result back on the stack top
 	loc.SetBytes(val.Bytes())
+	// Populate the cache so repeated reads in the same frame stay local
+	if evm.sloadCache != nil {
+		evm.sloadCache[sloadKey{addr: addr, slot: slot}] = val
+	}
 	return nil, nil
 }
 
@@ -523,6 +539,12 @@ func opSstore(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 	}
 	loc := scope.Stack.pop()
 	val := scope.Stack.pop()
+	// Ensure we invalidate stale cached reads before writing new data
+	if evm.sloadCache != nil {
+		addr := scope.Contract.Address()
+		slot := common.Hash(loc.Bytes32())
+		delete(evm.sloadCache, sloadKey{addr: addr, slot: slot})
+	}
 	evm.StateDB.SetState(scope.Contract.Address(), loc.Bytes32(), val.Bytes32())
 	return nil, nil
 }
